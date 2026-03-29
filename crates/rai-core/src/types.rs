@@ -451,3 +451,148 @@ pub struct PriceFilter {
 pub struct BalanceAssertionFilter {
     pub account_id: Option<AccountId>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    // Verifies that account types are correctly parsed from hierarchical
+    // account names (e.g. "Assets:Bank:Checking" -> Assets).
+    #[test]
+    fn account_type_from_name_valid() {
+        assert_eq!(AccountType::from_name("Assets:Bank:Checking"), Some(AccountType::Assets));
+        assert_eq!(AccountType::from_name("Liabilities:CreditCard"), Some(AccountType::Liabilities));
+        assert_eq!(AccountType::from_name("Income:Salary"), Some(AccountType::Income));
+        assert_eq!(AccountType::from_name("Expenses:Food"), Some(AccountType::Expenses));
+        assert_eq!(AccountType::from_name("Equity:OpeningBalances"), Some(AccountType::Equity));
+    }
+
+    // Verifies that parsing is case-insensitive (e.g. "ASSETS" works).
+    #[test]
+    fn account_type_from_name_case_insensitive() {
+        assert_eq!(AccountType::from_name("ASSETS:Bank"), Some(AccountType::Assets));
+        assert_eq!(AccountType::from_name("assets:bank"), Some(AccountType::Assets));
+        assert_eq!(AccountType::from_name("Assets"), Some(AccountType::Assets));
+    }
+
+    // Verifies that invalid account name prefixes return None.
+    #[test]
+    fn account_type_from_name_invalid() {
+        assert_eq!(AccountType::from_name("Unknown:Account"), None);
+        assert_eq!(AccountType::from_name(""), None);
+    }
+
+    // Verifies the as_str round-trip for AccountType.
+    #[test]
+    fn account_type_as_str() {
+        assert_eq!(AccountType::Assets.as_str(), "assets");
+        assert_eq!(AccountType::Equity.as_str(), "equity");
+    }
+
+    // Verifies all valid BookingMethod string representations parse correctly,
+    // including alternative forms like "avg" for Average.
+    #[test]
+    fn booking_method_from_str_valid() {
+        assert_eq!(BookingMethod::from_str("strict"), Some(BookingMethod::Strict));
+        assert_eq!(BookingMethod::from_str("strict_with_size"), Some(BookingMethod::StrictWithSize));
+        assert_eq!(BookingMethod::from_str("strictwithsize"), Some(BookingMethod::StrictWithSize));
+        assert_eq!(BookingMethod::from_str("fifo"), Some(BookingMethod::Fifo));
+        assert_eq!(BookingMethod::from_str("lifo"), Some(BookingMethod::Lifo));
+        assert_eq!(BookingMethod::from_str("hifo"), Some(BookingMethod::Hifo));
+        assert_eq!(BookingMethod::from_str("average"), Some(BookingMethod::Average));
+        assert_eq!(BookingMethod::from_str("avg"), Some(BookingMethod::Average));
+        assert_eq!(BookingMethod::from_str("none"), Some(BookingMethod::None));
+    }
+
+    // Verifies that invalid BookingMethod strings return None.
+    #[test]
+    fn booking_method_from_str_invalid() {
+        assert_eq!(BookingMethod::from_str("unknown"), None);
+    }
+
+    // Verifies the default booking method is Strict.
+    #[test]
+    fn booking_method_default() {
+        assert_eq!(BookingMethod::default(), BookingMethod::Strict);
+    }
+
+    // Verifies all TransactionStatus string representations parse correctly,
+    // including the symbol shortcuts (*, !, #).
+    #[test]
+    fn transaction_status_from_str() {
+        assert_eq!(TransactionStatus::from_str("completed"), Some(TransactionStatus::Completed));
+        assert_eq!(TransactionStatus::from_str("*"), Some(TransactionStatus::Completed));
+        assert_eq!(TransactionStatus::from_str("pending"), Some(TransactionStatus::Pending));
+        assert_eq!(TransactionStatus::from_str("!"), Some(TransactionStatus::Pending));
+        assert_eq!(TransactionStatus::from_str("flagged"), Some(TransactionStatus::Flagged));
+        assert_eq!(TransactionStatus::from_str("#"), Some(TransactionStatus::Flagged));
+        assert_eq!(TransactionStatus::from_str("unknown"), None);
+    }
+
+    // Verifies that Amount addition works for same-commodity amounts.
+    #[test]
+    fn amount_add() {
+        let a = Amount { value: dec!(10), commodity_id: CommodityId(1) };
+        let b = Amount { value: dec!(5), commodity_id: CommodityId(1) };
+        let result = a + b;
+        assert_eq!(result.value, dec!(15));
+        assert_eq!(result.commodity_id, CommodityId(1));
+    }
+
+    // Verifies that adding amounts of different commodities panics, since
+    // mixing currencies is a programming error.
+    #[test]
+    #[should_panic(expected = "Cannot add amounts of different commodities")]
+    fn amount_add_different_commodities_panics() {
+        let a = Amount { value: dec!(10), commodity_id: CommodityId(1) };
+        let b = Amount { value: dec!(5), commodity_id: CommodityId(2) };
+        let _ = a + b;
+    }
+
+    // Verifies that Amount subtraction works correctly.
+    #[test]
+    fn amount_sub() {
+        let a = Amount { value: dec!(10), commodity_id: CommodityId(1) };
+        let b = Amount { value: dec!(3), commodity_id: CommodityId(1) };
+        let result = a - b;
+        assert_eq!(result.value, dec!(7));
+    }
+
+    // Verifies that negating an Amount flips the sign.
+    #[test]
+    fn amount_negate() {
+        let a = Amount { value: dec!(10), commodity_id: CommodityId(1) };
+        assert_eq!(a.negate().value, dec!(-10));
+        assert_eq!((-a).value, dec!(-10));
+    }
+
+    // Verifies that is_zero correctly detects zero amounts.
+    #[test]
+    fn amount_is_zero() {
+        assert!(Amount { value: dec!(0), commodity_id: CommodityId(1) }.is_zero());
+        assert!(!Amount { value: dec!(1), commodity_id: CommodityId(1) }.is_zero());
+    }
+
+    // Verifies that scalar multiplication works (used for cost calculations).
+    #[test]
+    fn amount_mul_scalar() {
+        let a = Amount { value: dec!(10), commodity_id: CommodityId(1) };
+        let result = a.mul_scalar(dec!(3));
+        assert_eq!(result.value, dec!(30));
+        assert_eq!(result.commodity_id, CommodityId(1));
+    }
+
+    // Verifies that NewAccount correctly derives AccountType from its name.
+    #[test]
+    fn new_account_derives_type() {
+        let acct = NewAccount {
+            name: "Assets:Bank".to_string(),
+            opened_at: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: HashMap::new(),
+        };
+        assert_eq!(acct.account_type(), Some(AccountType::Assets));
+    }
+}

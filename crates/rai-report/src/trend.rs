@@ -248,3 +248,199 @@ pub fn generate_trailing_trend(
 
     generate_trend(&params, data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::LedgerData;
+    use rai_core::types::*;
+    use rust_decimal_macros::dec;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn make_account(id: i64, name: &str) -> Account {
+        Account {
+            id: AccountId(id),
+            name: name.into(),
+            account_type: AccountType::from_name(name).unwrap(),
+            is_open: true,
+            opened_at: date(2024, 1, 1),
+            closed_at: None,
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_posting(id: i64, tx_id: i64, account_id: i64, value: rust_decimal::Decimal, commodity_id: i64) -> Posting {
+        Posting {
+            id: PostingId(id),
+            transaction_id: TransactionId(tx_id),
+            account_id: AccountId(account_id),
+            units: Amount { value, commodity_id: CommodityId(commodity_id) },
+            cost: None,
+            price: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_tx(id: i64, d: NaiveDate, postings: Vec<Posting>) -> Transaction {
+        Transaction {
+            id: TransactionId(id),
+            date: d,
+            time: None,
+            status: TransactionStatus::Completed,
+            payee: None,
+            narration: None,
+            tags: vec![],
+            links: vec![],
+            postings,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    // Monthly buckets should produce end-of-month dates between start
+    // and end dates.
+    #[test]
+    fn monthly_buckets_generation() {
+        let buckets = generate_monthly_buckets(date(2024, 1, 1), date(2024, 3, 31));
+        assert_eq!(buckets.len(), 3);
+        assert_eq!(buckets[0], date(2024, 1, 31));
+        assert_eq!(buckets[1], date(2024, 2, 29)); // 2024 is a leap year
+        assert_eq!(buckets[2], date(2024, 3, 31));
+    }
+
+    // When start and end are in the same month, only one bucket should
+    // be generated.
+    #[test]
+    fn monthly_buckets_single_month() {
+        let buckets = generate_monthly_buckets(date(2024, 3, 5), date(2024, 3, 20));
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0], date(2024, 3, 20));
+    }
+
+    // Trend should compute cumulative balances at each monthly bucket,
+    // tracking how account balances grow over time.
+    #[test]
+    fn trend_cumulative_balance() {
+        let data = LedgerData {
+            accounts: vec![make_account(1, "Assets:Bank")],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 15), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                ]),
+                make_tx(2, date(2024, 2, 15), vec![
+                    make_posting(2, 2, 1, dec!(500), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = TrendParams {
+            period: ReportPeriod {
+                start: Some(date(2024, 1, 1)),
+                end: Some(date(2024, 3, 31)),
+            },
+            account_id: Some(AccountId(1)),
+            account_type: None,
+            interval: TrendInterval::Monthly,
+        };
+        let result = generate_trend(&params, &data);
+        assert_eq!(result.trends.len(), 1);
+        let points = &result.trends[0].points;
+        // Jan end: 1000, Feb end: 1500, Mar end: 1500
+        assert_eq!(points[0].balances[0].value, dec!(1000));
+        assert_eq!(points[1].balances[0].value, dec!(1500));
+        assert_eq!(points[2].balances[0].value, dec!(1500));
+    }
+
+    // With no transactions, trend should return empty results.
+    #[test]
+    fn trend_empty_data() {
+        let data = LedgerData {
+            accounts: vec![make_account(1, "Assets:Bank")],
+            transactions: vec![],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = TrendParams {
+            period: ReportPeriod { start: None, end: None },
+            account_id: None,
+            account_type: None,
+            interval: TrendInterval::Monthly,
+        };
+        let result = generate_trend(&params, &data);
+        assert!(result.trends.is_empty());
+    }
+
+    // Liability and equity accounts should have their balances negated
+    // for display (credit-normal to positive).
+    #[test]
+    fn trend_negates_liability_balances() {
+        let data = LedgerData {
+            accounts: vec![make_account(1, "Liabilities:CreditCard")],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 15), vec![
+                    make_posting(1, 1, 1, dec!(-500), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = TrendParams {
+            period: ReportPeriod {
+                start: Some(date(2024, 1, 1)),
+                end: Some(date(2024, 1, 31)),
+            },
+            account_id: Some(AccountId(1)),
+            account_type: None,
+            interval: TrendInterval::Monthly,
+        };
+        let result = generate_trend(&params, &data);
+        // Liability balance of -500 should be negated to 500 for display
+        assert_eq!(result.trends[0].points[0].balances[0].value, dec!(500));
+    }
+
+    // Default account selection (no filter) should include all balance
+    // sheet accounts but exclude income/expense accounts.
+    #[test]
+    fn trend_default_includes_balance_sheet_only() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+                make_account(3, "Expenses:Food"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 15), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                    make_posting(2, 1, 2, dec!(-1000), 1),
+                ]),
+                make_tx(2, date(2024, 1, 20), vec![
+                    make_posting(3, 2, 3, dec!(100), 1),
+                    make_posting(4, 2, 1, dec!(-100), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = TrendParams {
+            period: ReportPeriod { start: None, end: None },
+            account_id: None,
+            account_type: None,
+            interval: TrendInterval::Monthly,
+        };
+        let result = generate_trend(&params, &data);
+        // Only Assets:Bank should be in the trends (income/expense excluded)
+        let names: Vec<&str> = result.trends.iter().map(|t| t.account.name.as_str()).collect();
+        assert!(names.contains(&"Assets:Bank"));
+        assert!(!names.contains(&"Income:Salary"));
+        assert!(!names.contains(&"Expenses:Food"));
+    }
+}

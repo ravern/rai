@@ -508,3 +508,289 @@ pub fn compute_inventory(
         Err(errors)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ValidationError;
+    use crate::types::*;
+    use chrono::NaiveDate;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn cost(value: Decimal, commodity_id: i64, y: i32, m: u32, d: u32) -> Cost {
+        Cost {
+            amount: Amount { value, commodity_id: CommodityId(commodity_id) },
+            date: date(y, m, d),
+            label: None,
+        }
+    }
+
+    fn position(units: Decimal, commodity_id: i64, cost: Option<Cost>) -> Position {
+        Position {
+            units: Amount { value: units, commodity_id: CommodityId(commodity_id) },
+            cost,
+        }
+    }
+
+    fn sell_posting(units: Decimal, commodity_id: i64, cost: Option<Cost>) -> Posting {
+        Posting {
+            id: PostingId(1),
+            transaction_id: TransactionId(1),
+            account_id: AccountId(1),
+            units: Amount { value: units, commodity_id: CommodityId(commodity_id) },
+            cost,
+            price: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    // Verifies that adding a position to an empty inventory creates it.
+    #[test]
+    fn inventory_add_new_position() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, None));
+        assert_eq!(inv.positions().len(), 1);
+        assert_eq!(inv.positions()[0].units.value, dec!(10));
+    }
+
+    // Verifies that adding a position with the same commodity and cost
+    // merges into the existing position rather than creating a duplicate.
+    #[test]
+    fn inventory_merge_same_commodity_and_cost() {
+        let mut inv = Inventory::new();
+        let c = cost(dec!(50), 2, 2024, 1, 1);
+        inv.add(position(dec!(10), 1, Some(c.clone())));
+        inv.add(position(dec!(5), 1, Some(c)));
+        assert_eq!(inv.positions().len(), 1);
+        assert_eq!(inv.positions()[0].units.value, dec!(15));
+    }
+
+    // Verifies that positions with different costs are kept separate,
+    // which is essential for lot tracking.
+    #[test]
+    fn inventory_separate_lots_different_costs() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(60), 2, 2024, 2, 1))));
+        assert_eq!(inv.positions().len(), 2);
+    }
+
+    // Verifies balance_for_commodity sums across all lots of that commodity.
+    #[test]
+    fn inventory_balance_for_commodity() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(5), 1, Some(cost(dec!(60), 2, 2024, 2, 1))));
+        inv.add(position(dec!(20), 2, None));
+        assert_eq!(inv.balance_for_commodity(CommodityId(1)), dec!(15));
+        assert_eq!(inv.balance_for_commodity(CommodityId(2)), dec!(20));
+    }
+
+    // Strict booking: when only one lot matches, it should be consumed.
+    #[test]
+    fn book_strict_single_lot() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        let p = sell_posting(dec!(-5), 1, Some(cost(dec!(50), 2, 2024, 1, 1)));
+        let result = book_reduction(&mut inv, &p, BookingMethod::Strict).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].units.value, dec!(5));
+        assert_eq!(inv.positions()[0].units.value, dec!(5));
+    }
+
+    // Strict booking: when multiple lots exist and no cost is specified,
+    // it should return an AmbiguousLotMatch error.
+    #[test]
+    fn book_strict_ambiguous() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(60), 2, 2024, 2, 1))));
+        let p = sell_posting(dec!(-5), 1, None);
+        let err = book_reduction(&mut inv, &p, BookingMethod::Strict).unwrap_err();
+        assert!(matches!(&err[0], ValidationError::AmbiguousLotMatch { .. }));
+    }
+
+    // Strict booking: when no lot matches, it should return NoMatchingLot.
+    #[test]
+    fn book_strict_no_match() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        let p = sell_posting(dec!(-5), 1, Some(cost(dec!(99), 2, 2024, 1, 1)));
+        let err = book_reduction(&mut inv, &p, BookingMethod::Strict).unwrap_err();
+        assert!(matches!(&err[0], ValidationError::NoMatchingLot { .. }));
+    }
+
+    // StrictWithSize matches lots by exact unit amount, useful when lots
+    // are distinguishable by size rather than cost basis.
+    #[test]
+    fn book_strict_with_size_matches_exact_amount() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(5), 1, Some(cost(dec!(60), 2, 2024, 2, 1))));
+        let p = sell_posting(dec!(-5), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::StrictWithSize).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cost.amount.value, dec!(60));
+        assert_eq!(inv.positions().len(), 1);
+    }
+
+    // FIFO booking should consume the earliest lot first (by cost date).
+    #[test]
+    fn book_fifo_consumes_oldest_first() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(60), 2, 2024, 6, 1))));
+        let p = sell_posting(dec!(-10), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::Fifo).unwrap();
+        assert_eq!(result[0].cost.amount.value, dec!(50));
+        assert_eq!(inv.positions().len(), 1);
+        assert_eq!(inv.positions()[0].cost.as_ref().unwrap().amount.value, dec!(60));
+    }
+
+    // LIFO booking should consume the most recent lot first.
+    #[test]
+    fn book_lifo_consumes_newest_first() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(60), 2, 2024, 6, 1))));
+        let p = sell_posting(dec!(-10), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::Lifo).unwrap();
+        assert_eq!(result[0].cost.amount.value, dec!(60));
+        assert_eq!(inv.positions().len(), 1);
+        assert_eq!(inv.positions()[0].cost.as_ref().unwrap().amount.value, dec!(50));
+    }
+
+    // HIFO booking should consume the highest-cost lot first, which
+    // maximizes realized losses for tax purposes.
+    #[test]
+    fn book_hifo_consumes_highest_cost_first() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(80), 2, 2024, 3, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(60), 2, 2024, 6, 1))));
+        let p = sell_posting(dec!(-10), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::Hifo).unwrap();
+        assert_eq!(result[0].cost.amount.value, dec!(80));
+    }
+
+    // FIFO partial consumption: when reducing fewer units than the oldest
+    // lot holds, only part of that lot should be consumed.
+    #[test]
+    fn book_fifo_partial_consumption() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        let p = sell_posting(dec!(-3), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::Fifo).unwrap();
+        assert_eq!(result[0].units.value, dec!(3));
+        assert_eq!(inv.positions()[0].units.value, dec!(7));
+    }
+
+    // FIFO spanning multiple lots: a large reduction should consume
+    // multiple lots in order until fulfilled.
+    #[test]
+    fn book_fifo_spans_multiple_lots() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(5), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(60), 2, 2024, 6, 1))));
+        let p = sell_posting(dec!(-8), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::Fifo).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].units.value, dec!(5));
+        assert_eq!(result[1].units.value, dec!(3));
+        assert_eq!(inv.positions().len(), 1);
+        assert_eq!(inv.positions()[0].units.value, dec!(7));
+    }
+
+    // Average booking should compute the weighted average cost across all
+    // lots and reduce proportionally.
+    #[test]
+    fn book_average_computes_weighted_avg() {
+        let mut inv = Inventory::new();
+        // 10 units at $50 + 10 units at $70 = avg cost $60
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        inv.add(position(dec!(10), 1, Some(cost(dec!(70), 2, 2024, 6, 1))));
+        let p = sell_posting(dec!(-10), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::Average).unwrap();
+        assert_eq!(result[0].cost.amount.value, dec!(60));
+    }
+
+    // None booking: reduces inventory without requiring cost lot matching.
+    // Useful for commodities where lot tracking isn't needed.
+    #[test]
+    fn book_none_reduces_without_lot_match() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        let p = sell_posting(dec!(-3), 1, None);
+        let result = book_reduction(&mut inv, &p, BookingMethod::None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(inv.positions()[0].units.value, dec!(7));
+    }
+
+    // Verifies that reducing to exactly zero removes the position from
+    // the inventory entirely (no zero-unit ghosts).
+    #[test]
+    fn book_fifo_full_consumption_removes_position() {
+        let mut inv = Inventory::new();
+        inv.add(position(dec!(10), 1, Some(cost(dec!(50), 2, 2024, 1, 1))));
+        let p = sell_posting(dec!(-10), 1, None);
+        book_reduction(&mut inv, &p, BookingMethod::Fifo).unwrap();
+        assert!(inv.positions().is_empty());
+    }
+
+    // compute_inventory should replay postings and build up inventory
+    // correctly for a simple buy-then-sell scenario.
+    #[test]
+    fn compute_inventory_buy_and_sell() {
+        let buy = Posting {
+            id: PostingId(1),
+            transaction_id: TransactionId(1),
+            account_id: AccountId(1),
+            units: Amount { value: dec!(10), commodity_id: CommodityId(1) },
+            cost: Some(cost(dec!(50), 2, 2024, 1, 1)),
+            price: None,
+            metadata: HashMap::new(),
+        };
+        let sell = Posting {
+            id: PostingId(2),
+            transaction_id: TransactionId(2),
+            account_id: AccountId(1),
+            units: Amount { value: dec!(-3), commodity_id: CommodityId(1) },
+            cost: None,
+            price: None,
+            metadata: HashMap::new(),
+        };
+        let inv = compute_inventory(AccountId(1), &[buy, sell], BookingMethod::Fifo).unwrap();
+        assert_eq!(inv.balance_for_commodity(CommodityId(1)), dec!(7));
+    }
+
+    // compute_inventory should filter postings to only the specified
+    // account, ignoring postings for other accounts.
+    #[test]
+    fn compute_inventory_filters_by_account() {
+        let p1 = Posting {
+            id: PostingId(1),
+            transaction_id: TransactionId(1),
+            account_id: AccountId(1),
+            units: Amount { value: dec!(10), commodity_id: CommodityId(1) },
+            cost: None,
+            price: None,
+            metadata: HashMap::new(),
+        };
+        let p2 = Posting {
+            id: PostingId(2),
+            transaction_id: TransactionId(1),
+            account_id: AccountId(2),
+            units: Amount { value: dec!(20), commodity_id: CommodityId(1) },
+            cost: None,
+            price: None,
+            metadata: HashMap::new(),
+        };
+        let inv = compute_inventory(AccountId(1), &[p1, p2], BookingMethod::Strict).unwrap();
+        assert_eq!(inv.balance_for_commodity(CommodityId(1)), dec!(10));
+    }
+}

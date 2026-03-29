@@ -8,3 +8,6 @@ rai-core = { path = "../rai-core" }
 rust_decimal = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
