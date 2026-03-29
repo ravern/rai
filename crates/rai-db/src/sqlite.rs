@@ -1257,3 +1257,631 @@ impl StorageProvider for SqliteProvider {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rai_core::types::{
+        AccountFilter, AccountId, AccountType, Amount, BalanceAssertionFilter, BookingMethod,
+        CommodityUpdate, Cost, MetadataValue, NewAccount, NewBalanceAssertion,
+        NewCommodity, NewPosting, NewPrice, NewTransaction, TransactionFilter, TransactionStatus,
+        TransactionUpdate,
+    };
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn setup() -> SqliteProvider {
+        let mut db = SqliteProvider::open_in_memory().unwrap();
+        db.initialize().unwrap();
+        db
+    }
+
+    // Verifies that a commodity can be created and retrieved by ID.
+    #[test]
+    fn commodity_create_and_get() {
+        let mut db = setup();
+        let commodity = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        assert_eq!(commodity.name, "USD");
+        assert_eq!(commodity.precision, 2);
+
+        let fetched = db.get_commodity(commodity.id).unwrap().unwrap();
+        assert_eq!(fetched.name, "USD");
+    }
+
+    // Verifies that a commodity can be looked up by name.
+    #[test]
+    fn commodity_get_by_name() {
+        let mut db = setup();
+        db.create_commodity(&NewCommodity {
+            name: "EUR".into(),
+            precision: 2,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+        let fetched = db.get_commodity_by_name("EUR").unwrap().unwrap();
+        assert_eq!(fetched.name, "EUR");
+        assert!(db.get_commodity_by_name("GBP").unwrap().is_none());
+    }
+
+    // Verifies that listing commodities returns all created commodities.
+    #[test]
+    fn commodity_list() {
+        let mut db = setup();
+        db.create_commodity(&NewCommodity {
+            name: "USD".into(),
+            precision: 2,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+        db.create_commodity(&NewCommodity {
+            name: "EUR".into(),
+            precision: 2,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+        let list = db.list_commodities().unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    // Verifies that updating a commodity's precision persists correctly.
+    #[test]
+    fn commodity_update() {
+        let mut db = setup();
+        let c = db
+            .create_commodity(&NewCommodity {
+                name: "BTC".into(),
+                precision: 8,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let updated = db
+            .update_commodity(c.id, &CommodityUpdate { precision: Some(6) })
+            .unwrap();
+        assert_eq!(updated.precision, 6);
+    }
+
+    // Verifies that deleting a commodity removes it from the database.
+    #[test]
+    fn commodity_delete() {
+        let mut db = setup();
+        let c = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        db.delete_commodity(c.id).unwrap();
+        assert!(db.get_commodity(c.id).unwrap().is_none());
+    }
+
+    // Verifies that metadata is preserved through create and retrieve.
+    #[test]
+    fn commodity_metadata_roundtrip() {
+        let mut db = setup();
+        let mut meta = HashMap::new();
+        meta.insert("symbol".into(), MetadataValue::String("$".into()));
+        meta.insert("decimal_places".into(), MetadataValue::Number(dec!(2)));
+        let c = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: meta.clone(),
+            })
+            .unwrap();
+        assert_eq!(c.metadata.get("symbol"), Some(&MetadataValue::String("$".into())));
+        assert_eq!(c.metadata.get("decimal_places"), Some(&MetadataValue::Number(dec!(2))));
+    }
+
+    // Verifies that an account can be created with the correct derived
+    // account type and retrieved by ID.
+    #[test]
+    fn account_create_and_get() {
+        let mut db = setup();
+        let account = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank:Checking".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Fifo,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        assert_eq!(account.account_type, AccountType::Assets);
+        assert_eq!(account.booking_method, BookingMethod::Fifo);
+        assert!(account.is_open);
+
+        let fetched = db.get_account(account.id).unwrap().unwrap();
+        assert_eq!(fetched.name, "Assets:Bank:Checking");
+    }
+
+    // Verifies that closing and reopening an account updates the state.
+    #[test]
+    fn account_open_close_cycle() {
+        let mut db = setup();
+        let a = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let closed = db.close_account(a.id, date(2024, 6, 1)).unwrap();
+        assert!(!closed.is_open);
+        assert_eq!(closed.closed_at, Some(date(2024, 6, 1)));
+
+        let reopened = db.open_account(a.id, date(2024, 7, 1)).unwrap();
+        assert!(reopened.is_open);
+        assert!(reopened.closed_at.is_none());
+    }
+
+    // Verifies that account currency constraints are persisted.
+    #[test]
+    fn account_currencies() {
+        let mut db = setup();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let eur = db
+            .create_commodity(&NewCommodity {
+                name: "EUR".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let a = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![usd.id, eur.id],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        assert_eq!(a.currencies.len(), 2);
+    }
+
+    // Verifies that listing accounts with filters works correctly.
+    #[test]
+    fn account_list_filter() {
+        let mut db = setup();
+        db.create_account(&NewAccount {
+            name: "Assets:Bank".into(),
+            opened_at: date(2024, 1, 1),
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+        db.create_account(&NewAccount {
+            name: "Expenses:Food".into(),
+            opened_at: date(2024, 1, 1),
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+
+        let assets = db
+            .list_accounts(&AccountFilter {
+                account_type: Some(AccountType::Assets),
+                is_open: None,
+            })
+            .unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name, "Assets:Bank");
+    }
+
+    // Verifies that a transaction with postings, tags, and links is
+    // created and retrieved correctly with all associated data intact.
+    #[test]
+    fn transaction_create_and_get() {
+        let mut db = setup();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let a1 = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let a2 = db
+            .create_account(&NewAccount {
+                name: "Expenses:Food".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let tx = db
+            .create_transaction(&NewTransaction {
+                date: date(2024, 3, 15),
+                time: None,
+                status: TransactionStatus::Completed,
+                payee: Some("Grocery Store".into()),
+                narration: Some("Weekly groceries".into()),
+                tags: vec!["food".into(), "weekly".into()],
+                links: vec!["receipt-001".into()],
+                postings: vec![
+                    NewPosting {
+                        account_id: a1.id,
+                        units: Amount {
+                            value: dec!(-50),
+                            commodity_id: usd.id,
+                        },
+                        cost: None,
+                        price: None,
+                        metadata: HashMap::new(),
+                    },
+                    NewPosting {
+                        account_id: a2.id,
+                        units: Amount {
+                            value: dec!(50),
+                            commodity_id: usd.id,
+                        },
+                        cost: None,
+                        price: None,
+                        metadata: HashMap::new(),
+                    },
+                ],
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        assert_eq!(tx.payee, Some("Grocery Store".into()));
+        assert_eq!(tx.postings.len(), 2);
+        assert_eq!(tx.tags.len(), 2);
+        assert_eq!(tx.links.len(), 1);
+
+        let fetched = db.get_transaction(tx.id).unwrap().unwrap();
+        assert_eq!(fetched.postings.len(), 2);
+        assert_eq!(fetched.tags, vec!["food", "weekly"]);
+    }
+
+    // Verifies that transaction filtering by date range works.
+    #[test]
+    fn transaction_list_filter_by_date() {
+        let mut db = setup();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let a = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        for month in [1, 3, 6] {
+            db.create_transaction(&NewTransaction {
+                date: date(2024, month, 1),
+                time: None,
+                status: TransactionStatus::Completed,
+                payee: None,
+                narration: None,
+                tags: vec![],
+                links: vec![],
+                postings: vec![NewPosting {
+                    account_id: a.id,
+                    units: Amount {
+                        value: dec!(100),
+                        commodity_id: usd.id,
+                    },
+                    cost: None,
+                    price: None,
+                    metadata: HashMap::new(),
+                }],
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        }
+
+        let filtered = db
+            .list_transactions(&TransactionFilter {
+                from: Some(date(2024, 2, 1)),
+                to: Some(date(2024, 5, 1)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].date, date(2024, 3, 1));
+    }
+
+    // Verifies that updating transaction fields persists correctly.
+    #[test]
+    fn transaction_update() {
+        let mut db = setup();
+        db.create_account(&NewAccount {
+            name: "Assets:Bank".into(),
+            opened_at: date(2024, 1, 1),
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+
+        let tx = db
+            .create_transaction(&NewTransaction {
+                date: date(2024, 3, 1),
+                time: None,
+                status: TransactionStatus::Pending,
+                payee: None,
+                narration: None,
+                tags: vec![],
+                links: vec![],
+                postings: vec![],
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let updated = db
+            .update_transaction(
+                tx.id,
+                &TransactionUpdate {
+                    status: Some(TransactionStatus::Completed),
+                    payee: Some(Some("Updated Payee".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.status, TransactionStatus::Completed);
+        assert_eq!(updated.payee, Some("Updated Payee".into()));
+    }
+
+    // Verifies that deleting a transaction removes it and its postings.
+    #[test]
+    fn transaction_delete() {
+        let mut db = setup();
+        let a = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let tx = db
+            .create_transaction(&NewTransaction {
+                date: date(2024, 3, 1),
+                time: None,
+                status: TransactionStatus::Completed,
+                payee: None,
+                narration: None,
+                tags: vec![],
+                links: vec![],
+                postings: vec![NewPosting {
+                    account_id: a.id,
+                    units: Amount {
+                        value: dec!(100),
+                        commodity_id: usd.id,
+                    },
+                    cost: None,
+                    price: None,
+                    metadata: HashMap::new(),
+                }],
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        db.delete_transaction(tx.id).unwrap();
+        assert!(db.get_transaction(tx.id).unwrap().is_none());
+    }
+
+    // Verifies that postings with cost and price fields are persisted
+    // and retrieved correctly through the database roundtrip.
+    #[test]
+    fn posting_cost_and_price_roundtrip() {
+        let mut db = setup();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let btc = db
+            .create_commodity(&NewCommodity {
+                name: "BTC".into(),
+                precision: 8,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let a = db
+            .create_account(&NewAccount {
+                name: "Assets:Crypto".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let tx = db
+            .create_transaction(&NewTransaction {
+                date: date(2024, 3, 1),
+                time: None,
+                status: TransactionStatus::Completed,
+                payee: None,
+                narration: None,
+                tags: vec![],
+                links: vec![],
+                postings: vec![NewPosting {
+                    account_id: a.id,
+                    units: Amount {
+                        value: dec!(1.5),
+                        commodity_id: btc.id,
+                    },
+                    cost: Some(Cost {
+                        amount: Amount {
+                            value: dec!(50000),
+                            commodity_id: usd.id,
+                        },
+                        date: date(2024, 3, 1),
+                        label: Some("lot1".into()),
+                    }),
+                    price: Some(Amount {
+                        value: dec!(51000),
+                        commodity_id: usd.id,
+                    }),
+                    metadata: HashMap::new(),
+                }],
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let p = &tx.postings[0];
+        assert_eq!(p.units.value, dec!(1.5));
+        let cost = p.cost.as_ref().unwrap();
+        assert_eq!(cost.amount.value, dec!(50000));
+        assert_eq!(cost.label, Some("lot1".into()));
+        let price = p.price.as_ref().unwrap();
+        assert_eq!(price.value, dec!(51000));
+    }
+
+    // Verifies that price entries can be created and looked up by
+    // commodity pair and date.
+    #[test]
+    fn price_create_and_lookup() {
+        let mut db = setup();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let eur = db
+            .create_commodity(&NewCommodity {
+                name: "EUR".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let price = db
+            .create_price(&NewPrice {
+                date: date(2024, 3, 1),
+                commodity_id: usd.id,
+                target_commodity_id: eur.id,
+                value: dec!(0.92),
+            })
+            .unwrap();
+        assert_eq!(price.value, dec!(0.92));
+
+        let fetched = db.get_price(usd.id, eur.id, date(2024, 3, 1)).unwrap().unwrap();
+        assert_eq!(fetched.value, dec!(0.92));
+
+        // Different date should return None
+        assert!(db.get_price(usd.id, eur.id, date(2024, 4, 1)).unwrap().is_none());
+    }
+
+    // Verifies that balance assertions can be created and listed
+    // with account filtering.
+    #[test]
+    fn balance_assertion_create_and_list() {
+        let mut db = setup();
+        let usd = db
+            .create_commodity(&NewCommodity {
+                name: "USD".into(),
+                precision: 2,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+        let a = db
+            .create_account(&NewAccount {
+                name: "Assets:Bank".into(),
+                opened_at: date(2024, 1, 1),
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        db.create_balance_assertion(&NewBalanceAssertion {
+            date: date(2024, 3, 31),
+            account_id: a.id,
+            expected: Amount {
+                value: dec!(1000),
+                commodity_id: usd.id,
+            },
+        })
+        .unwrap();
+
+        let all = db
+            .list_balance_assertions(&BalanceAssertionFilter { account_id: None })
+            .unwrap();
+        assert_eq!(all.len(), 1);
+
+        let filtered = db
+            .list_balance_assertions(&BalanceAssertionFilter {
+                account_id: Some(AccountId(999)),
+            })
+            .unwrap();
+        assert!(filtered.is_empty());
+    }
+
+    // Verifies that raw SQL queries work and return correct column
+    // names and values.
+    #[test]
+    fn raw_query() {
+        let mut db = setup();
+        db.create_commodity(&NewCommodity {
+            name: "USD".into(),
+            precision: 2,
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+
+        let result = db.query_raw("SELECT name, precision FROM commodities").unwrap();
+        assert_eq!(result.columns, vec!["name", "precision"]);
+        assert_eq!(result.rows.len(), 1);
+        match &result.rows[0][0] {
+            QueryValue::Text(s) => assert_eq!(s, "USD"),
+            _ => panic!("expected text"),
+        }
+    }
+}

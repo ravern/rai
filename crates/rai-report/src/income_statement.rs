@@ -179,3 +179,155 @@ fn compute_net_income(total_income: &[Amount], total_expenses: &[Amount]) -> Vec
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::LedgerData;
+    use rai_core::types::*;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn make_account(id: i64, name: &str) -> Account {
+        Account {
+            id: AccountId(id),
+            name: name.into(),
+            account_type: AccountType::from_name(name).unwrap(),
+            is_open: true,
+            opened_at: date(2024, 1, 1),
+            closed_at: None,
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_posting(id: i64, tx_id: i64, account_id: i64, value: Decimal, commodity_id: i64) -> Posting {
+        Posting {
+            id: PostingId(id),
+            transaction_id: TransactionId(tx_id),
+            account_id: AccountId(account_id),
+            units: Amount { value, commodity_id: CommodityId(commodity_id) },
+            cost: None,
+            price: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_tx(id: i64, d: chrono::NaiveDate, postings: Vec<Posting>) -> Transaction {
+        Transaction {
+            id: TransactionId(id),
+            date: d,
+            time: None,
+            status: TransactionStatus::Completed,
+            payee: None,
+            narration: None,
+            tags: vec![],
+            links: vec![],
+            postings,
+            metadata: HashMap::new(),
+        }
+    }
+
+    // Verifies that income shows as positive (negated from credit-normal)
+    // and expenses stay positive, and net income = income - expenses.
+    #[test]
+    fn income_statement_basic() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+                make_account(3, "Expenses:Food"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 3, 1), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                    make_posting(2, 1, 2, dec!(-1000), 1),
+                ]),
+                make_tx(2, date(2024, 3, 15), vec![
+                    make_posting(3, 2, 3, dec!(200), 1),
+                    make_posting(4, 2, 1, dec!(-200), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = IncomeStatementParams {
+            period: ReportPeriod { start: None, end: None },
+            currency: None,
+        };
+        let result = generate_income_statement(&params, &data);
+        // Income: -(-1000) = 1000 (negated for display)
+        assert_eq!(result.income[0].balances[0].value, dec!(1000));
+        // Expenses: 200 (stays positive)
+        assert_eq!(result.expenses[0].balances[0].value, dec!(200));
+        // Net income: 1000 - 200 = 800
+        assert_eq!(result.net_income[0].value, dec!(800));
+    }
+
+    // Verifies that transactions outside the report period are excluded.
+    #[test]
+    fn income_statement_period_filter() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 1), vec![
+                    make_posting(1, 1, 1, dec!(500), 1),
+                    make_posting(2, 1, 2, dec!(-500), 1),
+                ]),
+                make_tx(2, date(2024, 6, 1), vec![
+                    make_posting(3, 2, 1, dec!(1000), 1),
+                    make_posting(4, 2, 2, dec!(-1000), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = IncomeStatementParams {
+            period: ReportPeriod {
+                start: Some(date(2024, 5, 1)),
+                end: Some(date(2024, 12, 31)),
+            },
+            currency: None,
+        };
+        let result = generate_income_statement(&params, &data);
+        // Only the June transaction should be included
+        assert_eq!(result.income[0].balances[0].value, dec!(1000));
+    }
+
+    // Assets accounts should not appear in the income statement.
+    #[test]
+    fn income_statement_excludes_balance_sheet_accounts() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 3, 1), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                    make_posting(2, 1, 2, dec!(-1000), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = IncomeStatementParams {
+            period: ReportPeriod { start: None, end: None },
+            currency: None,
+        };
+        let result = generate_income_statement(&params, &data);
+        assert_eq!(result.income.len(), 1);
+        assert!(result.expenses.is_empty());
+    }
+}

@@ -177,3 +177,118 @@ pub fn generate_trial_balance(
         rows,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::LedgerData;
+    use rai_core::types::*;
+    use rust_decimal_macros::dec;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn make_account(id: i64, name: &str) -> Account {
+        Account {
+            id: AccountId(id),
+            name: name.into(),
+            account_type: AccountType::from_name(name).unwrap(),
+            is_open: true,
+            opened_at: date(2024, 1, 1),
+            closed_at: None,
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_posting(id: i64, tx_id: i64, account_id: i64, value: Decimal, commodity_id: i64) -> Posting {
+        Posting {
+            id: PostingId(id),
+            transaction_id: TransactionId(tx_id),
+            account_id: AccountId(account_id),
+            units: Amount { value, commodity_id: CommodityId(commodity_id) },
+            cost: None,
+            price: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_tx(id: i64, d: NaiveDate, postings: Vec<Posting>) -> Transaction {
+        Transaction {
+            id: TransactionId(id),
+            date: d,
+            time: None,
+            status: TransactionStatus::Completed,
+            payee: None,
+            narration: None,
+            tags: vec![],
+            links: vec![],
+            postings,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    // Verifies that debits (positive postings) and credits (negative
+    // postings) are separated correctly per account, and balance = debit - credit.
+    #[test]
+    fn trial_balance_separates_debits_credits() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 3, 1), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),  // debit to Assets
+                    make_posting(2, 1, 2, dec!(-1000), 1), // credit to Income
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = TrialBalanceParams { as_of: date(2024, 12, 31) };
+        let result = generate_trial_balance(&params, &data);
+        assert_eq!(result.rows.len(), 2);
+
+        let bank = result.rows.iter().find(|r| r.account.name == "Assets:Bank").unwrap();
+        assert_eq!(bank.debits[0].value, dec!(1000));
+        assert!(bank.credits.is_empty());
+        assert_eq!(bank.balance[0].value, dec!(1000));
+
+        let salary = result.rows.iter().find(|r| r.account.name == "Income:Salary").unwrap();
+        assert!(salary.debits.is_empty());
+        assert_eq!(salary.credits[0].value, dec!(1000));
+        assert_eq!(salary.balance[0].value, dec!(-1000));
+    }
+
+    // Transactions after the as_of date should be excluded.
+    #[test]
+    fn trial_balance_respects_as_of() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 1), vec![
+                    make_posting(1, 1, 1, dec!(500), 1),
+                    make_posting(2, 1, 2, dec!(-500), 1),
+                ]),
+                make_tx(2, date(2024, 7, 1), vec![
+                    make_posting(3, 2, 1, dec!(300), 1),
+                    make_posting(4, 2, 2, dec!(-300), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = TrialBalanceParams { as_of: date(2024, 3, 1) };
+        let result = generate_trial_balance(&params, &data);
+        let bank = result.rows.iter().find(|r| r.account.name == "Assets:Bank").unwrap();
+        assert_eq!(bank.debits[0].value, dec!(500));
+    }
+}

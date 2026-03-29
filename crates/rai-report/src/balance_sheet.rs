@@ -163,3 +163,154 @@ fn sum_balances(
         amounts
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::LedgerData;
+    use rai_core::types::*;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn make_account(id: i64, name: &str) -> Account {
+        Account {
+            id: AccountId(id),
+            name: name.into(),
+            account_type: AccountType::from_name(name).unwrap(),
+            is_open: true,
+            opened_at: date(2024, 1, 1),
+            closed_at: None,
+            currencies: vec![],
+            booking_method: BookingMethod::Strict,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_posting(id: i64, tx_id: i64, account_id: i64, value: Decimal, commodity_id: i64) -> Posting {
+        Posting {
+            id: PostingId(id),
+            transaction_id: TransactionId(tx_id),
+            account_id: AccountId(account_id),
+            units: Amount { value, commodity_id: CommodityId(commodity_id) },
+            cost: None,
+            price: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_tx(id: i64, d: NaiveDate, postings: Vec<Posting>) -> Transaction {
+        Transaction {
+            id: TransactionId(id),
+            date: d,
+            time: None,
+            status: TransactionStatus::Completed,
+            payee: None,
+            narration: None,
+            tags: vec![],
+            links: vec![],
+            postings,
+            metadata: HashMap::new(),
+        }
+    }
+
+    // Verifies that asset accounts show positive balances and liability
+    // accounts show negated (credit-normal to positive) balances.
+    #[test]
+    fn balance_sheet_groups_accounts_correctly() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Liabilities:CreditCard"),
+                make_account(3, "Equity:Opening"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 3, 1), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                    make_posting(2, 1, 3, dec!(-1000), 1),
+                ]),
+                make_tx(2, date(2024, 3, 15), vec![
+                    make_posting(3, 2, 2, dec!(-500), 1),
+                    make_posting(4, 2, 1, dec!(500), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = BalanceSheetParams { as_of: date(2024, 12, 31), currency: None };
+        let result = generate_balance_sheet(&params, &data);
+
+        assert_eq!(result.assets.len(), 1);
+        assert_eq!(result.assets[0].balances[0].value, dec!(1500));
+        assert_eq!(result.liabilities.len(), 1);
+        // Liabilities are negated for display: -(-500) = 500
+        assert_eq!(result.liabilities[0].balances[0].value, dec!(500));
+        assert_eq!(result.equity.len(), 1);
+        // Equity negated: -(-1000) = 1000
+        assert_eq!(result.equity[0].balances[0].value, dec!(1000));
+    }
+
+    // Transactions after the as_of date should be excluded from the
+    // balance sheet.
+    #[test]
+    fn balance_sheet_respects_as_of_date() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 1), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                    make_posting(2, 1, 2, dec!(-1000), 1),
+                ]),
+                make_tx(2, date(2024, 7, 1), vec![
+                    make_posting(3, 2, 1, dec!(500), 1),
+                    make_posting(4, 2, 2, dec!(-500), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = BalanceSheetParams { as_of: date(2024, 3, 1), currency: None };
+        let result = generate_balance_sheet(&params, &data);
+        // Only the first transaction should be included
+        assert_eq!(result.assets[0].balances[0].value, dec!(1000));
+    }
+
+    // Income/Expense accounts should not appear on the balance sheet
+    // (they belong on the income statement).
+    #[test]
+    fn balance_sheet_excludes_income_expense() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Bank"),
+                make_account(2, "Income:Salary"),
+                make_account(3, "Expenses:Food"),
+            ],
+            transactions: vec![
+                make_tx(1, date(2024, 1, 1), vec![
+                    make_posting(1, 1, 1, dec!(1000), 1),
+                    make_posting(2, 1, 2, dec!(-1000), 1),
+                ]),
+                make_tx(2, date(2024, 1, 15), vec![
+                    make_posting(3, 2, 3, dec!(50), 1),
+                    make_posting(4, 2, 1, dec!(-50), 1),
+                ]),
+            ],
+            commodities: vec![],
+            prices: vec![],
+            balance_assertions: vec![],
+        };
+        let params = BalanceSheetParams { as_of: date(2024, 12, 31), currency: None };
+        let result = generate_balance_sheet(&params, &data);
+        assert!(result.assets.len() == 1);
+        assert!(result.liabilities.is_empty());
+        assert!(result.equity.is_empty());
+    }
+}
