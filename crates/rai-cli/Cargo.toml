@@ -23,3 +23,6 @@ tabled = "0.17"
 colored = "2"
 dirs = "6"
 rustyline = "15"
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
