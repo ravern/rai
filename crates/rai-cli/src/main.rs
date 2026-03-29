@@ -12,6 +12,7 @@ use rai_db::{SqliteProvider, StorageProvider};
 use commands::account::AccountAction;
 use commands::balance::BalanceAction;
 use commands::commodity::CommodityAction;
+use commands::file::FileAction;
 use commands::price::PriceAction;
 use commands::profile::ProfileAction;
 use commands::report::ReportAction;
@@ -67,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         action: BalanceAction,
     },
+    /// Export or import ledger data as a human-readable .rai file
+    File {
+        #[command(subcommand)]
+        action: FileAction,
+    },
     /// Check the ledger for errors (unbalanced transactions, failed assertions)
     Validate,
     /// Generate balance sheets, income statements, and other reports
@@ -101,6 +107,7 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Profile { .. } => unreachable!(),
+        Commands::File { action } => commands::file::handle(action, &mut provider),
         Commands::Commodity { action } => commands::commodity::handle(action, &mut provider),
         Commands::Account { action } => commands::account::handle(action, &mut provider),
         Commands::Tx { action } => commands::transaction::handle(action, &mut provider),

@@ -1,6 +1,7 @@
 pub mod account;
 pub mod balance;
 pub mod commodity;
+pub mod file;
 pub mod price;
 pub mod profile;
 pub mod query;
