@@ -1,0 +1,3 @@
+# rai
+
+Frontier personal finance.
