@@ -1,0 +1,10 @@
+[package]
+name = "rai-report"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rai-core = { path = "../rai-core" }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

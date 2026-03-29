@@ -1,0 +1,12 @@
+[package]
+name = "rai-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rai-core = { path = "../rai-core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

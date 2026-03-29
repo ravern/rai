@@ -1,0 +1,25 @@
+[package]
+name = "rai-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rai"
+path = "src/main.rs"
+
+[dependencies]
+rai-core = { path = "../rai-core" }
+rai-db = { path = "../rai-db" }
+rai-report = { path = "../rai-report" }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+tabled = "0.17"
+colored = "2"
+dirs = "6"
+rustyline = "15"
