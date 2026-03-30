@@ -1655,3 +1655,1190 @@ fn is_metadata_line(line: &str) -> bool {
         false
     }
 }
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    // -----------------------------------------------------------------------
+    // Helper parsing functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn escape_and_unescape_roundtrip() {
+        let original = r#"say "hello\" world"#;
+        let escaped = escape_str(original);
+        let unescaped = unescape_str(&escaped);
+        assert_eq!(unescaped, original);
+    }
+
+    #[test]
+    fn escape_str_handles_quotes_and_backslashes() {
+        assert_eq!(escape_str(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_str(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn unescape_str_handles_quotes_and_backslashes() {
+        assert_eq!(unescape_str(r#"a\"b"#), r#"a"b"#);
+        assert_eq!(unescape_str(r"a\\b"), r"a\b");
+    }
+
+    #[test]
+    fn parse_quoted_string_basic() {
+        let chars: Vec<char> = r#""hello world""#.chars().collect();
+        let mut pos = 0;
+        let result = parse_quoted_string(&chars, &mut pos).unwrap();
+        assert_eq!(result, "hello world");
+        assert_eq!(pos, chars.len());
+    }
+
+    #[test]
+    fn parse_quoted_string_with_escapes() {
+        let chars: Vec<char> = r#""say \"hi\"""#.chars().collect();
+        let mut pos = 0;
+        let result = parse_quoted_string(&chars, &mut pos).unwrap();
+        assert_eq!(result, r#"say "hi""#);
+    }
+
+    #[test]
+    fn parse_quoted_string_unterminated() {
+        let chars: Vec<char> = r#""no end"#.chars().collect();
+        let mut pos = 0;
+        assert!(parse_quoted_string(&chars, &mut pos).is_err());
+    }
+
+    #[test]
+    fn parse_tx_fields_narration_only() {
+        let (payee, narration, tags, links) = parse_tx_fields(r#""Groceries""#).unwrap();
+        assert_eq!(payee, None);
+        assert_eq!(narration.as_deref(), Some("Groceries"));
+        assert!(tags.is_empty());
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn parse_tx_fields_payee_and_narration() {
+        let (payee, narration, tags, links) =
+            parse_tx_fields(r#""Store" "Bought stuff""#).unwrap();
+        assert_eq!(payee.as_deref(), Some("Store"));
+        assert_eq!(narration.as_deref(), Some("Bought stuff"));
+        assert!(tags.is_empty());
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn parse_tx_fields_with_tags_and_links() {
+        let (payee, narration, tags, links) =
+            parse_tx_fields(r#""Lunch" #food #work ^receipt-123"#).unwrap();
+        assert_eq!(payee, None);
+        assert_eq!(narration.as_deref(), Some("Lunch"));
+        assert_eq!(tags, vec!["food", "work"]);
+        assert_eq!(links, vec!["receipt-123"]);
+    }
+
+    #[test]
+    fn parse_tx_fields_empty() {
+        let (payee, narration, tags, links) = parse_tx_fields("").unwrap();
+        assert_eq!(payee, None);
+        assert_eq!(narration, None);
+        assert!(tags.is_empty());
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn parse_posting_line_basic() {
+        let p = parse_posting_line("Assets:Bank  100.00 USD", 1).unwrap();
+        assert_eq!(p.account, "Assets:Bank");
+        assert_eq!(p.amount, dec!(100.00));
+        assert_eq!(p.commodity, "USD");
+        assert!(p.cost.is_none());
+        assert!(p.price.is_none());
+    }
+
+    #[test]
+    fn parse_posting_line_with_cost() {
+        let p = parse_posting_line(
+            "Assets:Stock  10 AAPL {150.00 USD, 2024-01-15}",
+            1,
+        )
+        .unwrap();
+        assert_eq!(p.account, "Assets:Stock");
+        assert_eq!(p.amount, dec!(10));
+        assert_eq!(p.commodity, "AAPL");
+        let cost = p.cost.unwrap();
+        assert_eq!(cost.amount, dec!(150.00));
+        assert_eq!(cost.commodity, "USD");
+        assert_eq!(cost.date, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert!(cost.label.is_none());
+    }
+
+    #[test]
+    fn parse_posting_line_with_cost_and_label() {
+        let p = parse_posting_line(
+            r#"Assets:Stock  10 AAPL {150.00 USD, 2024-01-15, "lot1"}"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(p.cost.as_ref().unwrap().label.as_deref(), Some("lot1"));
+    }
+
+    #[test]
+    fn parse_posting_line_with_price() {
+        let p = parse_posting_line("Assets:Foreign  100 EUR @ 1.10 USD", 1).unwrap();
+        assert_eq!(p.amount, dec!(100));
+        assert_eq!(p.commodity, "EUR");
+        let price = p.price.unwrap();
+        assert_eq!(price.amount, dec!(1.10));
+        assert_eq!(price.commodity, "USD");
+    }
+
+    #[test]
+    fn parse_posting_line_with_cost_and_price() {
+        let p = parse_posting_line(
+            "Assets:Stock  5 AAPL {100 USD, 2024-01-01} @ 150 USD",
+            1,
+        )
+        .unwrap();
+        assert!(p.cost.is_some());
+        assert!(p.price.is_some());
+        assert_eq!(p.price.unwrap().amount, dec!(150));
+    }
+
+    #[test]
+    fn parse_posting_line_too_few_parts() {
+        assert!(parse_posting_line("Assets:Bank", 1).is_err());
+    }
+
+    #[test]
+    fn parse_cost_content_basic() {
+        let cost = parse_cost_content("150.00 USD, 2024-01-15", 1).unwrap();
+        assert_eq!(cost.amount, dec!(150.00));
+        assert_eq!(cost.commodity, "USD");
+        assert_eq!(cost.date, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert!(cost.label.is_none());
+    }
+
+    #[test]
+    fn parse_cost_content_with_label() {
+        let cost = parse_cost_content(r#"50.00 EUR, 2024-03-01, "my-lot""#, 1).unwrap();
+        assert_eq!(cost.amount, dec!(50.00));
+        assert_eq!(cost.commodity, "EUR");
+        assert_eq!(cost.label.as_deref(), Some("my-lot"));
+    }
+
+    #[test]
+    fn parse_cost_content_missing_date() {
+        assert!(parse_cost_content("100 USD", 1).is_err());
+    }
+
+    #[test]
+    fn parse_meta_kv_string() {
+        let result = parse_meta_kv(r#"note: "hello""#).unwrap().unwrap();
+        assert_eq!(result.0, "note");
+        assert_eq!(result.1, MetadataValue::String("hello".to_string()));
+    }
+
+    #[test]
+    fn parse_meta_kv_number() {
+        let result = parse_meta_kv("amount: 42.5").unwrap().unwrap();
+        assert_eq!(result.0, "amount");
+        assert_eq!(result.1, MetadataValue::Number(dec!(42.5)));
+    }
+
+    #[test]
+    fn parse_meta_kv_date() {
+        let result = parse_meta_kv("due: 2024-06-15").unwrap().unwrap();
+        assert_eq!(result.0, "due");
+        assert_eq!(
+            result.1,
+            MetadataValue::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_meta_kv_bool() {
+        let (_, val) = parse_meta_kv("recurring: true").unwrap().unwrap();
+        assert_eq!(val, MetadataValue::Bool(true));
+        let (_, val) = parse_meta_kv("recurring: false").unwrap().unwrap();
+        assert_eq!(val, MetadataValue::Bool(false));
+    }
+
+    #[test]
+    fn parse_meta_kv_no_colon() {
+        assert!(parse_meta_kv("novalue").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_tx_header_time_with_time() {
+        let (time, rest) = parse_tx_header_time("2024-01-01 14:30:00 * \"Lunch\"");
+        assert_eq!(
+            time.unwrap(),
+            chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap()
+        );
+        assert_eq!(rest, "* \"Lunch\"");
+    }
+
+    #[test]
+    fn parse_tx_header_time_without_time() {
+        let (time, rest) = parse_tx_header_time("2024-01-01 * \"Lunch\"");
+        assert!(time.is_none());
+        assert_eq!(rest, "* \"Lunch\"");
+    }
+
+    #[test]
+    fn parse_tx_header_time_hh_mm() {
+        let (time, _rest) = parse_tx_header_time("2024-01-01 09:15 * \"Coffee\"");
+        assert_eq!(
+            time.unwrap(),
+            chrono::NaiveTime::from_hms_opt(9, 15, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn is_metadata_line_true_for_lowercase_key() {
+        assert!(is_metadata_line("note: hello"));
+        assert!(is_metadata_line("amount: 42"));
+    }
+
+    #[test]
+    fn is_metadata_line_false_for_account() {
+        assert!(!is_metadata_line("Assets:Bank  100 USD"));
+        assert!(!is_metadata_line("Expenses:Food  50 USD"));
+    }
+
+    #[test]
+    fn is_metadata_line_false_for_no_colon() {
+        assert!(!is_metadata_line("just some text"));
+    }
+
+    #[test]
+    fn detect_format_beancount_extensions() {
+        assert!(matches!(detect_format("file.beancount"), Format::Beancount));
+        assert!(matches!(detect_format("file.bean"), Format::Beancount));
+        assert!(matches!(detect_format("file.bc"), Format::Beancount));
+    }
+
+    #[test]
+    fn detect_format_defaults_to_rai() {
+        assert!(matches!(detect_format("file.rai"), Format::Rai));
+        assert!(matches!(detect_format("file.txt"), Format::Rai));
+        assert!(matches!(detect_format("file"), Format::Rai));
+    }
+
+    // -----------------------------------------------------------------------
+    // RAI format: parse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_rai_commodity() {
+        let input = "\
+commodity USD
+  precision: 2
+";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Commodity {
+                name, precision, ..
+            } => {
+                assert_eq!(name, "USD");
+                assert_eq!(*precision, 2);
+            }
+            _ => panic!("Expected Commodity directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_commodity_with_metadata() {
+        let input = "\
+commodity BTC
+  precision: 8
+  meta symbol: \"₿\"
+";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Commodity { metadata, .. } => {
+                assert_eq!(
+                    metadata.get("symbol"),
+                    Some(&MetadataValue::String("₿".to_string()))
+                );
+            }
+            _ => panic!("Expected Commodity directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_open_account() {
+        let input = "2024-01-01 open Assets:Bank:Checking USD, EUR\n";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Open {
+                date,
+                account,
+                currencies,
+                booking_method,
+                ..
+            } => {
+                assert_eq!(*date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+                assert_eq!(account, "Assets:Bank:Checking");
+                assert_eq!(currencies, &vec!["USD".to_string(), "EUR".to_string()]);
+                assert_eq!(*booking_method, BookingMethod::Strict);
+            }
+            _ => panic!("Expected Open directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_open_with_booking_method() {
+        let input = "\
+2024-01-01 open Assets:Stock
+  booking-method: fifo
+";
+        let directives = parse_rai(input).unwrap();
+        match &directives[0] {
+            Directive::Open {
+                booking_method, ..
+            } => {
+                assert_eq!(*booking_method, BookingMethod::Fifo);
+            }
+            _ => panic!("Expected Open directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_close_account() {
+        let input = "2024-12-31 close Assets:Bank:Checking\n";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Close { date, account } => {
+                assert_eq!(*date, NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+                assert_eq!(account, "Assets:Bank:Checking");
+            }
+            _ => panic!("Expected Close directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_simple_transaction() {
+        let input = "\
+2024-03-15 * \"Grocery Store\" \"Weekly groceries\"
+  Expenses:Food  50.00 USD
+  Assets:Bank:Checking  -50.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Transaction {
+                date,
+                status,
+                payee,
+                narration,
+                postings,
+                ..
+            } => {
+                assert_eq!(*date, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+                assert_eq!(*status, TransactionStatus::Completed);
+                assert_eq!(payee.as_deref(), Some("Grocery Store"));
+                assert_eq!(narration.as_deref(), Some("Weekly groceries"));
+                assert_eq!(postings.len(), 2);
+                assert_eq!(postings[0].account, "Expenses:Food");
+                assert_eq!(postings[0].amount, dec!(50.00));
+                assert_eq!(postings[1].account, "Assets:Bank:Checking");
+                assert_eq!(postings[1].amount, dec!(-50.00));
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_transaction_with_time() {
+        let input = "\
+2024-03-15 14:30:00 * \"Lunch\"
+  Expenses:Food  15.00 USD
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { time, .. } => {
+                assert_eq!(
+                    time.unwrap(),
+                    chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap()
+                );
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_transaction_pending() {
+        let input = "\
+2024-03-15 ! \"Pending payment\"
+  Expenses:Rent  1000.00 USD
+  Assets:Bank  -1000.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { status, .. } => {
+                assert_eq!(*status, TransactionStatus::Pending);
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_transaction_with_tags_and_links() {
+        let input = "\
+2024-03-15 * \"Lunch\" #food ^inv-001
+  Expenses:Food  15.00 USD
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { tags, links, .. } => {
+                assert_eq!(tags, &vec!["food".to_string()]);
+                assert_eq!(links, &vec!["inv-001".to_string()]);
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_transaction_with_metadata() {
+        let input = "\
+2024-03-15 * \"Lunch\"
+  meta source: \"bank-import\"
+  Expenses:Food  15.00 USD
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { metadata, .. } => {
+                assert_eq!(
+                    metadata.get("source"),
+                    Some(&MetadataValue::String("bank-import".to_string()))
+                );
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_transaction_with_posting_metadata() {
+        let input = "\
+2024-03-15 * \"Lunch\"
+  Expenses:Food  15.00 USD
+    meta receipt: \"img001.jpg\"
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { postings, .. } => {
+                assert_eq!(
+                    postings[0].metadata.get("receipt"),
+                    Some(&MetadataValue::String("img001.jpg".to_string()))
+                );
+                assert!(postings[1].metadata.is_empty());
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_price() {
+        let input = "2024-06-01 price EUR 1.08 USD\n";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Price {
+                date,
+                commodity,
+                value,
+                target_commodity,
+            } => {
+                assert_eq!(*date, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap());
+                assert_eq!(commodity, "EUR");
+                assert_eq!(*value, dec!(1.08));
+                assert_eq!(target_commodity, "USD");
+            }
+            _ => panic!("Expected Price directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_balance() {
+        let input = "2024-06-30 balance Assets:Bank 5000.00 USD\n";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Balance {
+                date,
+                account,
+                amount,
+                commodity,
+            } => {
+                assert_eq!(*date, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+                assert_eq!(account, "Assets:Bank");
+                assert_eq!(*amount, dec!(5000.00));
+                assert_eq!(commodity, "USD");
+            }
+            _ => panic!("Expected Balance directive"),
+        }
+    }
+
+    #[test]
+    fn parse_rai_comments_and_blanks_ignored() {
+        let input = "\
+; This is a comment
+
+; Another comment
+commodity USD
+  precision: 2
+
+";
+        let directives = parse_rai(input).unwrap();
+        assert_eq!(directives.len(), 1);
+    }
+
+    #[test]
+    fn parse_rai_full_ledger() {
+        let input = "\
+; rai ledger v1
+
+; --- Commodities ---
+
+commodity USD
+  precision: 2
+
+commodity EUR
+  precision: 2
+
+; --- Accounts ---
+
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Food
+
+; --- Transactions ---
+
+2024-03-15 * \"Grocery Store\" \"Weekly groceries\"
+  Expenses:Food  50.00 USD
+  Assets:Bank  -50.00 USD
+
+; --- Prices ---
+
+2024-06-01 price EUR 1.08 USD
+
+; --- Balance Assertions ---
+
+2024-06-30 balance Assets:Bank 950.00 USD
+";
+        let directives = parse_rai(input).unwrap();
+        // 2 commodities + 2 accounts + 1 transaction + 1 price + 1 balance = 7
+        assert_eq!(directives.len(), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // Beancount format: parse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_beancount_commodity() {
+        let input = "\
+1970-01-01 commodity USD
+  rai-precision: 2
+";
+        let directives = parse_beancount(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        match &directives[0] {
+            Directive::Commodity {
+                name, precision, ..
+            } => {
+                assert_eq!(name, "USD");
+                assert_eq!(*precision, 2);
+            }
+            _ => panic!("Expected Commodity directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_commodity_default_precision() {
+        let input = "1970-01-01 commodity BTC\n";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Commodity { precision, .. } => {
+                assert_eq!(*precision, 2); // default
+            }
+            _ => panic!("Expected Commodity directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_open_with_currencies_and_booking() {
+        let input = r#"2024-01-01 open Assets:Stock AAPL,GOOG "FIFO""#;
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Open {
+                account,
+                currencies,
+                booking_method,
+                ..
+            } => {
+                assert_eq!(account, "Assets:Stock");
+                assert_eq!(currencies, &vec!["AAPL".to_string(), "GOOG".to_string()]);
+                assert_eq!(*booking_method, BookingMethod::Fifo);
+            }
+            _ => panic!("Expected Open directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_close() {
+        let input = "2024-12-31 close Assets:Bank\n";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Close { date, account } => {
+                assert_eq!(*date, NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+                assert_eq!(account, "Assets:Bank");
+            }
+            _ => panic!("Expected Close directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_transaction() {
+        let input = "\
+2024-03-15 * \"Store\" \"Bought stuff\"
+  Expenses:Food  50.00 USD
+  Assets:Bank  -50.00 USD
+";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction {
+                status,
+                payee,
+                narration,
+                postings,
+                ..
+            } => {
+                assert_eq!(*status, TransactionStatus::Completed);
+                assert_eq!(payee.as_deref(), Some("Store"));
+                assert_eq!(narration.as_deref(), Some("Bought stuff"));
+                assert_eq!(postings.len(), 2);
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_transaction_with_time_metadata() {
+        let input = "\
+2024-03-15 * \"Lunch\"
+  time: \"14:30:00\"
+  Expenses:Food  15.00 USD
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { time, .. } => {
+                assert_eq!(
+                    time.unwrap(),
+                    chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap()
+                );
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_txn_keyword() {
+        let input = "\
+2024-03-15 txn \"Lunch\"
+  Expenses:Food  15.00 USD
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { status, .. } => {
+                assert_eq!(*status, TransactionStatus::Completed);
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_pending_transaction() {
+        let input = "\
+2024-03-15 ! \"Pending\"
+  Expenses:Rent  1000 USD
+  Assets:Bank  -1000 USD
+";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { status, .. } => {
+                assert_eq!(*status, TransactionStatus::Pending);
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_price() {
+        let input = "2024-06-01 price EUR 1.08 USD\n";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Price {
+                commodity,
+                value,
+                target_commodity,
+                ..
+            } => {
+                assert_eq!(commodity, "EUR");
+                assert_eq!(*value, dec!(1.08));
+                assert_eq!(target_commodity, "USD");
+            }
+            _ => panic!("Expected Price directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_balance() {
+        let input = "2024-06-30 balance Assets:Bank 5000.00 USD\n";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Balance {
+                account,
+                amount,
+                commodity,
+                ..
+            } => {
+                assert_eq!(account, "Assets:Bank");
+                assert_eq!(*amount, dec!(5000.00));
+                assert_eq!(commodity, "USD");
+            }
+            _ => panic!("Expected Balance directive"),
+        }
+    }
+
+    #[test]
+    fn parse_beancount_skips_options_and_plugins() {
+        let input = "\
+option \"operating_currency\" \"USD\"
+plugin \"beancount.plugins.auto_accounts\"
+include \"other.beancount\"
+
+1970-01-01 commodity USD
+  rai-precision: 2
+";
+        let directives = parse_beancount(input).unwrap();
+        assert_eq!(directives.len(), 1);
+    }
+
+    #[test]
+    fn parse_beancount_skips_unsupported_directives() {
+        let input = "\
+2024-01-01 pad Assets:Bank Equity:Opening-Balances
+2024-01-01 note Assets:Bank \"Opened account\"
+2024-01-01 event \"location\" \"US\"
+
+2024-01-01 open Assets:Bank USD
+";
+        let directives = parse_beancount(input).unwrap();
+        assert_eq!(directives.len(), 1);
+        assert!(matches!(&directives[0], Directive::Open { .. }));
+    }
+
+    #[test]
+    fn parse_beancount_posting_metadata() {
+        let input = "\
+2024-03-15 * \"Lunch\"
+  Expenses:Food  15.00 USD
+    receipt: \"scan.pdf\"
+  Assets:Cash  -15.00 USD
+";
+        let directives = parse_beancount(input).unwrap();
+        match &directives[0] {
+            Directive::Transaction { postings, .. } => {
+                assert_eq!(
+                    postings[0].metadata.get("receipt"),
+                    Some(&MetadataValue::String("scan.pdf".to_string()))
+                );
+            }
+            _ => panic!("Expected Transaction directive"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Beancount booking method conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beancount_booking_roundtrip() {
+        let methods = [
+            BookingMethod::Strict,
+            BookingMethod::StrictWithSize,
+            BookingMethod::Fifo,
+            BookingMethod::Lifo,
+            BookingMethod::Hifo,
+            BookingMethod::Average,
+            BookingMethod::None,
+        ];
+        for method in methods {
+            let s = beancount_booking_str(method);
+            let parsed = beancount_booking_from_str(s).unwrap();
+            assert_eq!(parsed, method, "Failed roundtrip for {:?}", method);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RAI format: generate + roundtrip
+    // -----------------------------------------------------------------------
+
+    fn make_ledger_data() -> LedgerData {
+        let commodities = vec![
+            Commodity {
+                id: CommodityId(1),
+                name: "USD".to_string(),
+                precision: 2,
+                metadata: Metadata::new(),
+            },
+            Commodity {
+                id: CommodityId(2),
+                name: "EUR".to_string(),
+                precision: 2,
+                metadata: Metadata::new(),
+            },
+        ];
+        let accounts = vec![
+            Account {
+                id: AccountId(1),
+                name: "Assets:Bank".to_string(),
+                account_type: AccountType::Assets,
+                is_open: true,
+                opened_at: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                closed_at: None,
+                currencies: vec![CommodityId(1)],
+                booking_method: BookingMethod::Strict,
+                metadata: Metadata::new(),
+            },
+            Account {
+                id: AccountId(2),
+                name: "Expenses:Food".to_string(),
+                account_type: AccountType::Expenses,
+                is_open: true,
+                opened_at: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                closed_at: None,
+                currencies: vec![],
+                booking_method: BookingMethod::Strict,
+                metadata: Metadata::new(),
+            },
+        ];
+        let transactions = vec![Transaction {
+            id: TransactionId(1),
+            date: NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+            time: None,
+            status: TransactionStatus::Completed,
+            payee: Some("Store".to_string()),
+            narration: Some("Groceries".to_string()),
+            tags: vec!["food".to_string()],
+            links: vec![],
+            postings: vec![
+                Posting {
+                    id: PostingId(1),
+                    transaction_id: TransactionId(1),
+                    account_id: AccountId(2),
+                    units: Amount {
+                        value: dec!(50),
+                        commodity_id: CommodityId(1),
+                    },
+                    cost: None,
+                    price: None,
+                    metadata: Metadata::new(),
+                },
+                Posting {
+                    id: PostingId(2),
+                    transaction_id: TransactionId(1),
+                    account_id: AccountId(1),
+                    units: Amount {
+                        value: dec!(-50),
+                        commodity_id: CommodityId(1),
+                    },
+                    cost: None,
+                    price: None,
+                    metadata: Metadata::new(),
+                },
+            ],
+            metadata: Metadata::new(),
+        }];
+        let prices = vec![Price {
+            id: PriceId(1),
+            date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            commodity_id: CommodityId(2),
+            target_commodity_id: CommodityId(1),
+            value: dec!(1.08),
+        }];
+        let assertions = vec![BalanceAssertion {
+            id: BalanceAssertionId(1),
+            date: NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+            account_id: AccountId(1),
+            expected: Amount {
+                value: dec!(950),
+                commodity_id: CommodityId(1),
+            },
+        }];
+
+        let commodity_name: HashMap<CommodityId, String> =
+            commodities.iter().map(|c| (c.id, c.name.clone())).collect();
+        let account_name: HashMap<AccountId, String> =
+            accounts.iter().map(|a| (a.id, a.name.clone())).collect();
+
+        LedgerData {
+            commodities,
+            accounts,
+            transactions,
+            prices,
+            assertions,
+            commodity_name,
+            account_name,
+        }
+    }
+
+    #[test]
+    fn generate_rai_contains_all_sections() {
+        let data = make_ledger_data();
+        let output = generate_rai(&data);
+
+        assert!(output.contains("; rai ledger v1"));
+        assert!(output.contains("commodity USD"));
+        assert!(output.contains("commodity EUR"));
+        assert!(output.contains("precision: 2"));
+        assert!(output.contains("2024-01-01 open Assets:Bank USD"));
+        assert!(output.contains("2024-01-01 open Expenses:Food"));
+        assert!(output.contains("2024-03-15 * \"Store\" \"Groceries\" #food"));
+        assert!(output.contains("Expenses:Food  50 USD"));
+        assert!(output.contains("Assets:Bank  -50 USD"));
+        assert!(output.contains("2024-06-01 price EUR 1.08 USD"));
+        assert!(output.contains("2024-06-30 balance Assets:Bank 950 USD"));
+    }
+
+    #[test]
+    fn rai_roundtrip_parse_generate_parse() {
+        let data = make_ledger_data();
+        let generated = generate_rai(&data);
+        let directives = parse_rai(&generated).unwrap();
+
+        // 2 commodities + 2 accounts + 1 transaction + 1 price + 1 balance = 7
+        assert_eq!(directives.len(), 7);
+
+        // Verify key directive contents survive the roundtrip
+        let commodities: Vec<_> = directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Commodity { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commodities, vec!["USD", "EUR"]);
+
+        let accounts: Vec<_> = directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Open { account, .. } => Some(account.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(accounts, vec!["Assets:Bank", "Expenses:Food"]);
+
+        let tx_count = directives
+            .iter()
+            .filter(|d| matches!(d, Directive::Transaction { .. }))
+            .count();
+        assert_eq!(tx_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Beancount format: generate + roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generate_beancount_contains_all_sections() {
+        let data = make_ledger_data();
+        let output = generate_beancount(&data);
+
+        assert!(output.contains("1970-01-01 commodity USD"));
+        assert!(output.contains("rai-precision: 2"));
+        assert!(output.contains("2024-01-01 open Assets:Bank USD"));
+        assert!(output.contains("2024-03-15 * \"Store\" \"Groceries\" #food"));
+        assert!(output.contains("2024-06-01 price EUR 1.08 USD"));
+        assert!(output.contains("2024-06-30 balance Assets:Bank 950 USD"));
+    }
+
+    #[test]
+    fn beancount_roundtrip_parse_generate_parse() {
+        let data = make_ledger_data();
+        let generated = generate_beancount(&data);
+        let directives = parse_beancount(&generated).unwrap();
+
+        // 2 commodities + 2 accounts + 1 transaction + 1 price + 1 balance = 7
+        assert_eq!(directives.len(), 7);
+
+        let commodities: Vec<_> = directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Commodity { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commodities, vec!["USD", "EUR"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: transactions with cost/price in generate → parse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rai_roundtrip_with_cost_and_price() {
+        let input = "\
+commodity USD
+  precision: 2
+
+commodity AAPL
+  precision: 0
+
+2024-01-01 open Assets:Stock
+2024-01-01 open Assets:Bank
+
+2024-03-15 * \"Buy stock\"
+  Assets:Stock  10 AAPL {150 USD, 2024-03-15} @ 150 USD
+  Assets:Bank  -1500 USD
+";
+        let directives = parse_rai(input).unwrap();
+        let tx = directives.iter().find_map(|d| match d {
+            Directive::Transaction { postings, .. } => Some(postings),
+            _ => None,
+        });
+        let postings = tx.unwrap();
+        assert_eq!(postings.len(), 2);
+
+        let stock_posting = &postings[0];
+        assert_eq!(stock_posting.account, "Assets:Stock");
+        assert_eq!(stock_posting.amount, dec!(10));
+        assert_eq!(stock_posting.commodity, "AAPL");
+
+        let cost = stock_posting.cost.as_ref().unwrap();
+        assert_eq!(cost.amount, dec!(150));
+        assert_eq!(cost.commodity, "USD");
+        assert_eq!(
+            cost.date,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+        );
+
+        let price = stock_posting.price.as_ref().unwrap();
+        assert_eq!(price.amount, dec!(150));
+        assert_eq!(price.commodity, "USD");
+    }
+
+    #[test]
+    fn generate_rai_transaction_with_time() {
+        let mut data = make_ledger_data();
+        data.transactions[0].time =
+            Some(chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap());
+        let output = generate_rai(&data);
+        assert!(output.contains("2024-03-15 14:30:00 *"));
+    }
+
+    #[test]
+    fn generate_beancount_stores_time_as_metadata() {
+        let mut data = make_ledger_data();
+        data.transactions[0].time =
+            Some(chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap());
+        let output = generate_beancount(&data);
+        assert!(output.contains("time: \"14:30:00\""));
+        // Beancount header should NOT contain time
+        assert!(!output.contains("2024-03-15 14:30:00"));
+    }
+
+    #[test]
+    fn generate_rai_closed_account() {
+        let mut data = make_ledger_data();
+        data.accounts[0].closed_at =
+            Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+        let output = generate_rai(&data);
+        assert!(output.contains("2024-12-31 close Assets:Bank"));
+    }
+
+    #[test]
+    fn generate_rai_nonstrict_booking() {
+        let mut data = make_ledger_data();
+        data.accounts[0].booking_method = BookingMethod::Fifo;
+        let output = generate_rai(&data);
+        assert!(output.contains("booking-method: fifo"));
+    }
+
+    #[test]
+    fn generate_beancount_nonstrict_booking() {
+        let mut data = make_ledger_data();
+        data.accounts[0].booking_method = BookingMethod::Fifo;
+        let output = generate_beancount(&data);
+        assert!(output.contains("\"FIFO\""));
+    }
+
+    #[test]
+    fn generate_rai_empty_data() {
+        let data = LedgerData {
+            commodities: vec![],
+            accounts: vec![],
+            transactions: vec![],
+            prices: vec![],
+            assertions: vec![],
+            commodity_name: HashMap::new(),
+            account_name: HashMap::new(),
+        };
+        let output = generate_rai(&data);
+        assert_eq!(output, "; rai ledger v1\n");
+    }
+
+    #[test]
+    fn generate_beancount_empty_data() {
+        let data = LedgerData {
+            commodities: vec![],
+            accounts: vec![],
+            transactions: vec![],
+            prices: vec![],
+            assertions: vec![],
+            commodity_name: HashMap::new(),
+            account_name: HashMap::new(),
+        };
+        let output = generate_beancount(&data);
+        assert!(output.contains(";; -*- mode: beancount"));
+        // No sections beyond the header
+        assert!(!output.contains("commodity"));
+    }
+
+    #[test]
+    fn format_meta_value_all_types() {
+        assert_eq!(
+            format_meta_value(&MetadataValue::String("hi".to_string())),
+            "\"hi\""
+        );
+        assert_eq!(
+            format_meta_value(&MetadataValue::Number(dec!(42.5))),
+            "42.5"
+        );
+        assert_eq!(
+            format_meta_value(&MetadataValue::Date(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+            )),
+            "2024-01-01"
+        );
+        assert_eq!(format_meta_value(&MetadataValue::Bool(true)), "true");
+        assert_eq!(format_meta_value(&MetadataValue::Bool(false)), "false");
+    }
+}
