@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 
 use rai_core::types::{Account, AccountType, Amount, CommodityId};
 
-use crate::conversion::convert_amounts;
+use crate::conversion::convert_amounts_as_of;
 use crate::data::LedgerData;
 
 pub struct BalanceSheetParams {
@@ -78,7 +78,7 @@ pub fn generate_balance_sheet(params: &BalanceSheetParams, data: &LedgerData) ->
         }
 
         let balances = if let Some(target) = params.currency {
-            convert_amounts(&balances, target, &data.prices)
+            convert_amounts_as_of(&balances, target, &data.prices, Some(params.as_of))
         } else {
             balances
         };
@@ -119,9 +119,9 @@ pub fn generate_balance_sheet(params: &BalanceSheetParams, data: &LedgerData) ->
     liabilities.sort_by(|a, b| a.account.name.cmp(&b.account.name));
     equity.sort_by(|a, b| a.account.name.cmp(&b.account.name));
 
-    let total_assets = sum_balances(&assets, params.currency, &data.prices);
-    let total_liabilities = sum_balances(&liabilities, params.currency, &data.prices);
-    let total_equity = sum_balances(&equity, params.currency, &data.prices);
+    let total_assets = sum_balances(&assets, params.currency, &data.prices, params.as_of);
+    let total_liabilities = sum_balances(&liabilities, params.currency, &data.prices, params.as_of);
+    let total_equity = sum_balances(&equity, params.currency, &data.prices, params.as_of);
 
     BalanceSheetResult {
         as_of: params.as_of,
@@ -138,6 +138,7 @@ fn sum_balances(
     account_balances: &[AccountBalance],
     currency: Option<CommodityId>,
     prices: &[rai_core::types::Price],
+    as_of: NaiveDate,
 ) -> Vec<Amount> {
     let mut totals: HashMap<CommodityId, Decimal> = HashMap::new();
 
@@ -158,7 +159,7 @@ fn sum_balances(
         .collect();
 
     if let Some(target) = currency {
-        convert_amounts(&amounts, target, prices)
+        convert_amounts_as_of(&amounts, target, prices, Some(as_of))
     } else {
         amounts
     }
@@ -214,6 +215,16 @@ mod tests {
             links: vec![],
             postings,
             metadata: HashMap::new(),
+        }
+    }
+
+    fn make_price(id: i64, commodity: i64, target: i64, value: Decimal, d: NaiveDate) -> Price {
+        Price {
+            id: PriceId(id),
+            date: d,
+            commodity_id: CommodityId(commodity),
+            target_commodity_id: CommodityId(target),
+            value,
         }
     }
 
@@ -281,6 +292,43 @@ mod tests {
         let result = generate_balance_sheet(&params, &data);
         // Only the first transaction should be included
         assert_eq!(result.assets[0].balances[0].value, dec!(1000));
+    }
+
+    // Balance sheet currency conversion should find transitive price paths and
+    // only use prices on or before the report date.
+    #[test]
+    fn balance_sheet_converts_multi_hop_prices_as_of_date() {
+        let data = LedgerData {
+            accounts: vec![
+                make_account(1, "Assets:Crypto"),
+                make_account(2, "Equity:Opening"),
+            ],
+            transactions: vec![make_tx(
+                1,
+                date(2024, 1, 1),
+                vec![
+                    make_posting(1, 1, 1, dec!(10), 1),
+                    make_posting(2, 1, 2, dec!(-10), 1),
+                ],
+            )],
+            commodities: vec![],
+            prices: vec![
+                make_price(1, 1, 2, dec!(2), date(2024, 1, 1)),
+                make_price(2, 1, 2, dec!(9), date(2024, 7, 1)),
+                make_price(3, 2, 3, dec!(3), date(2024, 1, 1)),
+            ],
+            balance_assertions: vec![],
+        };
+        let params = BalanceSheetParams {
+            as_of: date(2024, 6, 30),
+            currency: Some(CommodityId(3)),
+        };
+        let result = generate_balance_sheet(&params, &data);
+
+        assert_eq!(result.assets[0].balances[0].value, dec!(60));
+        assert_eq!(result.assets[0].balances[0].commodity_id, CommodityId(3));
+        assert_eq!(result.total_assets[0].value, dec!(60));
+        assert_eq!(result.total_assets[0].commodity_id, CommodityId(3));
     }
 
     // Income/Expense accounts should not appear on the balance sheet
