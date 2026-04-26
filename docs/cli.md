@@ -477,7 +477,7 @@ rai query                  # enter interactive SQL REPL
 rai query "<sql>"          # run a single SQL query
 ```
 
-Executes SQL directly against the underlying SQLite database. Results are displayed as formatted tables.
+Executes read-only SQL directly against the underlying SQLite database. Results are displayed as formatted tables. Mutating SQL is rejected so writes always go through audited rai commands.
 
 **Interactive REPL commands:**
 - Type SQL and press Enter to execute
@@ -490,6 +490,28 @@ rai query "SELECT date, payee, narration FROM v_journal WHERE account = 'Expense
 ```
 
 See `docs/sql-recipes.md` for a collection of useful queries.
+
+---
+
+## audit -- View history and undo/redo changes
+
+```
+rai audit log [--limit <n>] [--entity-type <type>] [--entity-id <id>]
+rai audit show <event-id>
+rai audit undo [--steps <n>]
+rai audit redo [--steps <n>]
+```
+
+Every database mutation made through rai is recorded in the database audit log. Existing data is imported as baseline audit events the first time an older database is initialized with audit support.
+
+| Command      | Description                                      |
+|--------------|--------------------------------------------------|
+| `log`        | Show recent audit events                         |
+| `show`       | Show one event with before/after JSON snapshots  |
+| `undo`       | Undo the latest undoable mutation                |
+| `redo`       | Reapply the latest undone mutation               |
+
+Baseline events are viewable but not undoable. New mutations after an undo clear the redo stack.
 
 ---
 

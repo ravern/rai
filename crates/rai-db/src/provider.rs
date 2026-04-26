@@ -19,6 +19,65 @@ pub struct QueryResult {
     pub rows: Vec<Vec<QueryValue>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AuditEventId(pub i64);
+
+impl std::fmt::Display for AuditEventId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditEventKind {
+    Baseline,
+    Mutation,
+    Undo,
+    Redo,
+}
+
+impl AuditEventKind {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "baseline" => Some(Self::Baseline),
+            "mutation" => Some(Self::Mutation),
+            "undo" => Some(Self::Undo),
+            "redo" => Some(Self::Redo),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Mutation => "mutation",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditEvent {
+    pub id: AuditEventId,
+    pub created_at: String,
+    pub kind: AuditEventKind,
+    pub operation: String,
+    pub entity_type: String,
+    pub entity_id: Option<i64>,
+    pub summary: String,
+    pub target_event_id: Option<AuditEventId>,
+    pub before_json: Option<String>,
+    pub after_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuditFilter {
+    pub entity_type: Option<String>,
+    pub entity_id: Option<i64>,
+    pub limit: Option<usize>,
+}
+
 /// Core storage operations. Each method maps to CRUD on the public schema.
 pub trait StorageProvider {
     /// Create all tables, indexes, and views if they do not already exist.
@@ -94,4 +153,11 @@ pub trait StorageProvider {
     // ── Raw query ────────────────────────────────────────────────────
 
     fn query_raw(&self, sql: &str) -> Result<QueryResult, DbError>;
+
+    // ── Audit log ───────────────────────────────────────────────────
+
+    fn list_audit_events(&self, filter: &AuditFilter) -> Result<Vec<AuditEvent>, DbError>;
+    fn get_audit_event(&self, id: AuditEventId) -> Result<Option<AuditEvent>, DbError>;
+    fn undo_last_audit_event(&mut self) -> Result<AuditEvent, DbError>;
+    fn redo_last_audit_event(&mut self) -> Result<AuditEvent, DbError>;
 }

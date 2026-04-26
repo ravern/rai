@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use rai_db::{SqliteProvider, StorageProvider};
 
 use commands::account::AccountAction;
+use commands::audit::AuditAction;
 use commands::balance::BalanceAction;
 use commands::commodity::CommodityAction;
 use commands::file::FileAction;
@@ -85,6 +86,11 @@ enum Commands {
         /// SQL to execute; omit to enter the interactive REPL
         sql: Option<String>,
     },
+    /// View audit history and undo or redo recent changes
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
 }
 
 fn main() {
@@ -116,6 +122,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Validate => commands::validate::handle(&mut provider),
         Commands::Report { action } => commands::report::handle(action, &mut provider),
         Commands::Query { sql } => commands::query::handle(sql, &mut provider),
+        Commands::Audit { action } => commands::audit::handle(action, &mut provider),
     }
 }
 

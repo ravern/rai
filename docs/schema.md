@@ -279,6 +279,37 @@ ORDER BY ba.date;
 
 ---
 
+### audit_events
+
+Append-only history of database changes. rai writes baseline events for existing rows when audit support is first initialized, mutation events for normal writes, and undo/redo events when history is replayed.
+
+| Column          | Type    | Description                                      |
+|-----------------|---------|--------------------------------------------------|
+| id              | INTEGER | Primary key                                      |
+| created_at      | TEXT    | RFC 3339 timestamp                               |
+| kind            | TEXT    | `baseline`, `mutation`, `undo`, or `redo`        |
+| operation       | TEXT    | `backfill`, `create`, `update`, `delete`, etc.   |
+| entity_type     | TEXT    | `commodity`, `account`, `transaction`, `price`, or `balance_assertion` |
+| entity_id       | INTEGER | Affected entity ID, when applicable              |
+| summary         | TEXT    | Human-readable event summary                     |
+| target_event_id | INTEGER | Original mutation event for undo/redo events     |
+| before_json     | TEXT    | JSON snapshot before the change                  |
+| after_json      | TEXT    | JSON snapshot after the change                   |
+
+### audit_undo_stack and audit_redo_stack
+
+Internal linear undo/redo stacks. Baseline events are not added to the undo stack.
+
+### audit_metadata
+
+Internal audit state, including whether one-time baseline backfill has completed.
+
+### audit_id_counters
+
+Internal explicit ID allocation state. rai uses this to avoid reusing IDs that undo/redo may need to restore.
+
+---
+
 ## Indexes
 
 The following indexes are created automatically for query performance:
@@ -290,6 +321,8 @@ The following indexes are created automatically for query performance:
 | idx_transactions_date           | transactions(date)         |
 | idx_prices_commodity_date       | prices(commodity_id, date) |
 | idx_balance_assertions_date     | balance_assertions(date)   |
+| idx_audit_events_created        | audit_events(created_at)   |
+| idx_audit_events_entity         | audit_events(entity_type, entity_id) |
 
 ---
 

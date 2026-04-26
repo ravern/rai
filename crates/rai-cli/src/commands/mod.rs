@@ -1,4 +1,5 @@
 pub mod account;
+pub mod audit;
 pub mod balance;
 pub mod commodity;
 pub mod file;
