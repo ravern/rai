@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use rai_core::types::{Account, AccountType, Amount, CommodityId};
 
 use crate::balance_sheet::AccountBalance;
-use crate::conversion::convert_amounts;
+use crate::conversion::convert_amounts_as_of;
 use crate::data::{LedgerData, ReportPeriod};
 
 pub struct IncomeStatementParams {
@@ -78,7 +78,7 @@ pub fn generate_income_statement(
         }
 
         let balances = if let Some(target) = params.currency {
-            convert_amounts(&balances, target, &data.prices)
+            convert_amounts_as_of(&balances, target, &data.prices, params.period.end)
         } else {
             balances
         };
@@ -112,8 +112,10 @@ pub fn generate_income_statement(
     income.sort_by(|a, b| a.account.name.cmp(&b.account.name));
     expenses.sort_by(|a, b| a.account.name.cmp(&b.account.name));
 
-    let total_income = sum_account_balances(&income, params.currency, &data.prices);
-    let total_expenses = sum_account_balances(&expenses, params.currency, &data.prices);
+    let total_income =
+        sum_account_balances(&income, params.currency, &data.prices, params.period.end);
+    let total_expenses =
+        sum_account_balances(&expenses, params.currency, &data.prices, params.period.end);
     let net_income = compute_net_income(&total_income, &total_expenses);
 
     IncomeStatementResult {
@@ -133,6 +135,7 @@ fn sum_account_balances(
     account_balances: &[AccountBalance],
     currency: Option<CommodityId>,
     prices: &[rai_core::types::Price],
+    as_of: Option<chrono::NaiveDate>,
 ) -> Vec<Amount> {
     let mut totals: HashMap<CommodityId, Decimal> = HashMap::new();
 
@@ -153,7 +156,7 @@ fn sum_account_balances(
         .collect();
 
     if let Some(target) = currency {
-        convert_amounts(&amounts, target, prices)
+        convert_amounts_as_of(&amounts, target, prices, as_of)
     } else {
         amounts
     }
